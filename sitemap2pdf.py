@@ -59,9 +59,11 @@ def main(sitemap_url, output_filename, limit, hide_classes, no_cache):
         pdf_path = url.replace("https://", "").replace("http://", "").replace("/", "_") + ".pdf"
 
         if os.path.exists(pdf_path) and not no_cache:
-            print(f"Skipping {pdf_path} as it already exists (use --no-cache to override)")
+            print(f"Using cached {pdf_path}")
+            merged_pdf.append(pdf_path)
             continue
 
+    # ... rest of your code ...
         if avg_time_per_url:
             eta_seconds = avg_time_per_url * (total_urls - index)
             eta_minutes = int(eta_seconds // 60)
