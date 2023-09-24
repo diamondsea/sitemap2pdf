@@ -1,67 +1,103 @@
-import requests
-import sys
-import time
+import asyncio
 from bs4 import BeautifulSoup
-import pdfkit
+import requests
 from PyPDF2 import PdfMerger
-from selenium import webdriver
-from selenium.webdriver.common.by import By
+from pyppeteer import launch
+import argparse
+import time
+import os
 
-def parse_sitemap(sitemap_url):
+async def convert_url_to_pdf(url, pdf_path, hide_classes):
+    browser = await launch()
+    page = await browser.newPage()
+    
+    await page.goto(url)
+    
+    for cls in hide_classes:
+        elements = await page.querySelectorAll(f".{cls}")
+        for elem in elements:
+            await page.evaluate('(elem) => elem.style.display = "none"', elem)
+    
+    await page.pdf({'path': pdf_path, 'format': 'A4', 'printBackground': True})
+    
+    await browser.close()
+
+def parse_sitemap(sitemap_url, all_urls=None):
+    if all_urls is None:
+        all_urls = []
+
     resp = requests.get(sitemap_url)
     soup = BeautifulSoup(resp.content, 'xml')
     urls = [loc.text for loc in soup.find_all('loc')]
-    if not urls:
-        urls = [link.get('href') for link in soup.find_all('link') if link.get('href')]
-    return urls
-
-def convert_links_to_pdf(urls, output_filename, hide_classes=None, num_links=None, start_offset=0):
-    if hide_classes is None:
-        hide_classes = []
     
-    options = {
-        'no-outline': None,
-        'quiet': ''
-    }
+    # Display details of the current sitemap being processed
+    print(f"Reading sitemap: {sitemap_url}")
+    print(f"Number of URLs found: {len(urls)}")
+    
+    sitemap_links = [url for url in urls if 'sitemap' in url.lower()]
+    if sitemap_links:
+        for link in sitemap_links:
+            parse_sitemap(link, all_urls)
+    else:
+        all_urls.extend(urls)
+
+    return all_urls
+
+def main(sitemap_url, output_filename, limit, hide_classes, no_cache):
+    all_urls = parse_sitemap(sitemap_url)
+    if limit:
+        all_urls = all_urls[:limit]
 
     merged_pdf = PdfMerger()
-    total_urls = len(urls)
-    num_links = num_links or total_urls
-    end_offset = start_offset + num_links
-    urls_subset = urls[start_offset:end_offset]
-    
-    with webdriver.Chrome() as driver:
-        for index, url in enumerate(urls_subset, 1):
-            start_time = time.time()
-            print(f"{index + start_offset} of {total_urls} ({(index/num_links)*100:.2f}%) completed, getting {url}")
-            try:
-                driver.get(url)
-                for cls in hide_classes:
-                    # elements = driver.find_elements_by_class_name(cls)
-                    elements = driver.find_elements(By.CLASS_NAME, cls)
-                    for elem in elements:
-                        driver.execute_script("arguments[0].style.display = 'none';", elem)
-                rendered_html = driver.page_source
-                pdf_path = url.replace("https://", "").replace("http://", "").replace("/", "_") + ".pdf"
-                pdfkit.from_string(rendered_html, pdf_path, options=options)
-                # merged_pdf.append(pdf_path)
-            except Exception as e:
-                print(f"Error processing {url}: {e}")
-            
-            elapsed_time = time.time() - start_time
-            estimated_remaining = (num_links - index) * elapsed_time
-            print(f"Remaining {estimated_remaining/60:.2f} minutes")
-    
+    total_urls = len(all_urls)
+    start_time = time.time()
+    avg_time_per_url = None
+
+    for index, url in enumerate(all_urls, 1):
+        current_time = time.time()
+        elapsed_time = current_time - start_time
+        pdf_path = url.replace("https://", "").replace("http://", "").replace("/", "_") + ".pdf"
+
+        if os.path.exists(pdf_path) and not no_cache:
+            print(f"Skipping {pdf_path} as it already exists (use --no-cache to override)")
+            continue
+
+        if avg_time_per_url:
+            eta_seconds = avg_time_per_url * (total_urls - index)
+            eta_minutes = int(eta_seconds // 60)
+            eta_seconds = int(eta_seconds % 60)
+            eta = f"{eta_minutes}m {eta_seconds}s"
+        else:
+            eta = "Calculating..."
+
+        percentage_complete = (index / total_urls) * 100
+        print(f"[{percentage_complete:.2f}% - ETA: {eta}] Processing {index} of {total_urls}: {url}")
+        asyncio.get_event_loop().run_until_complete(convert_url_to_pdf(url, pdf_path, hide_classes))
+        merged_pdf.append(pdf_path)
+
+        if index == 5:
+            avg_time_per_url = elapsed_time / index
+
     merged_pdf.write(output_filename)
     merged_pdf.close()
 
 if __name__ == '__main__':
-    sitemap_url = sys.argv[1]
-    output_filename = sys.argv[2]
-    num_links = int(sys.argv[3])
-    start_offset = int(sys.argv[4])
-    hide_classes = sys.argv[5:]
-    
-    urls = parse_sitemap(sitemap_url)
-    convert_links_to_pdf(urls, output_filename, hide_classes=hide_classes, num_links=num_links, start_offset=start_offset)
+    parser = argparse.ArgumentParser(description="Convert sitemap URLs to a merged PDF.")
+    parser.add_argument('--sitemap_url', required=True, help="URL of the sitemap to process.")
+    parser.add_argument('--output_filename', required=True, help="Filename for the merged PDF output.")
+    parser.add_argument('--limit', type=int, default=None, help="Limit the number of URLs processed.")
+    parser.add_argument('--start_offset', type=int, default=0, help="Starting offset for the URLs.")
+    parser.add_argument('--hide_classes', nargs='*', default=[], help="List of classes to hide in the PDF.")
+    parser.add_argument('--no-cache', action='store_true', help="If set, the script will not use cached PDFs and will regenerate them.")
+
+    args = parser.parse_args()
+    urls = parse_sitemap(args.sitemap_url)[args.start_offset:]
+    if args.limit:
+        urls = urls[:args.limit]
+
+    main(args.sitemap_url, args.output_filename, len(urls), args.hide_classes, args.no_cache)
+
+
+
+
 
